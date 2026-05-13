@@ -56,6 +56,8 @@ CAT_NAMES = get_env_list("CAT_NAMES", fallback_var_name="CATEGORY_NAME")
 
 session = requests.Session()
 
+UNHEALTHY_CROSS_SEED_STATES = {"error", "missingFiles"}
+
 
 def read_cache():
     if not os.path.exists(CACHE_FILE):
@@ -295,6 +297,10 @@ def find_matching_original_torrent(original_torrents, cross_seed_torrent):
     return None
 
 
+def is_processable_cross_seed(torrent):
+    return torrent.get("state") not in UNHEALTHY_CROSS_SEED_STATES
+
+
 def main():
     if not qb_login(QB_URL, QB_USERNAME, QB_PASSWORD):
         return
@@ -323,6 +329,10 @@ def main():
             print(f"State: {torrent['state']}")
             print(f"Hash: {torrent['hash']}")
             print("---")
+            if not is_processable_cross_seed(torrent):
+                print(f"Skipping unhealthy cross-seed torrent: {torrent['state']}")
+                print("---")
+                continue
 
             original_torrent = find_matching_original_torrent(original_torrents, torrent)
             if not original_torrent:

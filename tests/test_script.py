@@ -115,6 +115,47 @@ class MainLoopTests(unittest.TestCase):
     def setUp(self):
         self.script = load_script()
 
+    def test_unhealthy_cross_seed_state_is_not_processed_or_cached(self):
+        source = {
+            "hash": "sourcehash",
+            "name": "Movie.2024.1080p",
+            "seeding_time_limit": 60,
+            "seeding_time": 600,
+            "tags": "",
+            "category": "movies",
+        }
+
+        for state in ("error", "missingFiles"):
+            with self.subTest(state=state):
+                cross_seed = {
+                    "hash": f"crosshash-{state}",
+                    "name": "Movie.2024.1080p",
+                    "state": state,
+                    "seeding_time": 0,
+                }
+
+                with (
+                    patch.object(self.script, "qb_login", return_value=True),
+                    patch.object(self.script, "read_cache", return_value={}),
+                    patch.object(
+                        self.script,
+                        "get_torrents_by_category",
+                        return_value=[cross_seed],
+                    ),
+                    patch.object(
+                        self.script,
+                        "get_torrents_excluding_category_and_tag",
+                        return_value=[source],
+                    ),
+                    patch.object(self.script, "set_torrent_seed_limits") as set_limits,
+                    patch.object(self.script, "cache_torrent") as cache_torrent,
+                    redirect_stdout(io.StringIO()),
+                ):
+                    self.script.main()
+
+                set_limits.assert_not_called()
+                cache_torrent.assert_not_called()
+
     def test_failed_qb_update_is_not_cached(self):
         cross_seed = {
             "hash": "crosshash",
