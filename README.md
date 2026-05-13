@@ -12,6 +12,11 @@ two torrents reach their seeding-time limit at the same time.
 - Reads cross-seed torrents from configured categories.
 - Finds matching source torrents outside that category and without the `cross-seed`
   tag.
+- Falls back to qBittorrent file-list matching when torrent names differ. The
+  fallback first narrows candidates by total size, then matches file sizes while
+  allowing small extra files on the injected torrent.
+- Skips file-list fallback matches when multiple source torrents match, so seed
+  limits are not aligned to an ambiguous source.
 - Calculates the cross-seed torrent's total seed-time limit from qBittorrent's
   elapsed `seeding_time` fields.
 - Caches only successfully updated torrents so failed or dry-run updates are retried.
@@ -41,6 +46,7 @@ SCHEDULE=30
 CACHE_EXPIRY_DAYS=14
 CACHE_FILE=torrent_cache.json
 MATCH_THRESHOLD=1
+PARTIAL_MATCH_MAX_EXTRA_BYTES=52428800
 REQUEST_TIMEOUT=30
 ```
 

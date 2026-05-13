@@ -14,6 +14,7 @@ REQUIRED_ENV = {
     "CATEGORY_NAME": "unused",
     "TAG_NAMES": "unused",
     "CAT_NAMES": '["cross-seed"]',
+    "PARTIAL_MATCH_MAX_EXTRA_BYTES": "100",
 }
 
 
@@ -68,6 +69,131 @@ class AlignmentTests(unittest.TestCase):
             self.script.calculate_aligned_seed_time_limit(source, cross_seed),
             -1,
         )
+
+
+class MatchingTests(unittest.TestCase):
+    def setUp(self):
+        self.script = load_script()
+
+    def test_renamed_cross_seed_matches_source_when_only_small_extra_files_differ(self):
+        cross_seed = {
+            "hash": "crosshash",
+            "name": "CC_(1955)_Song of the Road",
+            "size": 1_050,
+        }
+        source = {
+            "hash": "sourcehash",
+            "name": "Pather Panchali 1955 1080p Blu-ray AVC LPCM 1.0",
+            "size": 1_000,
+        }
+
+        def fake_get_files(_url, torrent_hash):
+            return {
+                "crosshash": [
+                    {"name": "feature.mkv", "size": 1_000},
+                    {"name": "booklet.pdf", "size": 50},
+                ],
+                "sourcehash": [
+                    {"name": "Pather Panchali.mkv", "size": 1_000},
+                ],
+            }[torrent_hash]
+
+        with patch.object(self.script, "get_torrent_files", side_effect=fake_get_files):
+            match = self.script.find_matching_original_torrent(
+                [source],
+                cross_seed,
+                "http://qbittorrent.local",
+            )
+
+        self.assertEqual(match, source)
+
+    def test_file_list_fallback_skips_ambiguous_matches(self):
+        cross_seed = {
+            "hash": "crosshash",
+            "name": "CC_(1955)_Song of the Road",
+            "size": 1_050,
+        }
+        source_a = {
+            "hash": "sourcehash-a",
+            "name": "Unrelated A",
+            "size": 1_000,
+        }
+        source_b = {
+            "hash": "sourcehash-b",
+            "name": "Unrelated B",
+            "size": 1_000,
+        }
+
+        def fake_get_files(_url, torrent_hash):
+            return {
+                "crosshash": [
+                    {"name": "feature.mkv", "size": 1_000},
+                    {"name": "booklet.pdf", "size": 50},
+                ],
+                "sourcehash-a": [
+                    {"name": "first.mkv", "size": 1_000},
+                ],
+                "sourcehash-b": [
+                    {"name": "second.mkv", "size": 1_000},
+                ],
+            }[torrent_hash]
+
+        with (
+            patch.object(self.script, "get_torrent_files", side_effect=fake_get_files),
+            redirect_stdout(io.StringIO()),
+        ):
+            match = self.script.find_matching_original_torrent(
+                [source_a, source_b],
+                cross_seed,
+                "http://qbittorrent.local",
+            )
+
+        self.assertIsNone(match)
+
+    def test_file_list_fallback_only_fetches_size_window_candidates(self):
+        cross_seed = {
+            "hash": "crosshash",
+            "name": "CC_(1955)_Song of the Road",
+            "size": 1_050,
+        }
+        source_in_window = {
+            "hash": "sourcehash",
+            "name": "Pather Panchali 1955 1080p Blu-ray AVC LPCM 1.0",
+            "size": 1_000,
+        }
+        source_too_small = {
+            "hash": "smallhash",
+            "name": "Small Movie",
+            "size": 100,
+        }
+        source_too_large = {
+            "hash": "largehash",
+            "name": "Large Movie",
+            "size": 2_000,
+        }
+        fetched_hashes = []
+
+        def fake_get_files(_url, torrent_hash):
+            fetched_hashes.append(torrent_hash)
+            return {
+                "crosshash": [
+                    {"name": "feature.mkv", "size": 1_000},
+                    {"name": "booklet.pdf", "size": 50},
+                ],
+                "sourcehash": [
+                    {"name": "Pather Panchali.mkv", "size": 1_000},
+                ],
+            }[torrent_hash]
+
+        with patch.object(self.script, "get_torrent_files", side_effect=fake_get_files):
+            match = self.script.find_matching_original_torrent(
+                [source_too_small, source_in_window, source_too_large],
+                cross_seed,
+                "http://qbittorrent.local",
+            )
+
+        self.assertEqual(match, source_in_window)
+        self.assertEqual(fetched_hashes, ["crosshash", "sourcehash"])
 
 
 class QbittorrentApiTests(unittest.TestCase):

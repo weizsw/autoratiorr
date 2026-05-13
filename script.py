@@ -3,6 +3,7 @@ import math
 import os
 import re
 import time
+from collections import Counter
 from datetime import datetime, timedelta
 
 import requests
@@ -47,6 +48,9 @@ CACHE_EXPIRY_DAYS = int(os.getenv("CACHE_EXPIRY_DAYS", "14"))
 CACHE_FILE = os.getenv("CACHE_FILE", "torrent_cache.json")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ["true", "1", "t"]
 MATCH_THRESHOLD = float(os.getenv("MATCH_THRESHOLD", "1"))
+PARTIAL_MATCH_MAX_EXTRA_BYTES = int(
+    os.getenv("PARTIAL_MATCH_MAX_EXTRA_BYTES", str(50 * 1024 * 1024))
+)
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
 SCHEDULE = int(os.getenv("SCHEDULE", "30"))
 QB_URL = get_env_variable("QB_URL")
@@ -170,6 +174,23 @@ def get_torrents_by_tag(url, tag_name):
         return None
 
 
+def get_torrent_files(url, torrent_hash):
+    files_url = f"{url}/api/v2/torrents/files"
+    params = {"hash": torrent_hash}
+    try:
+        response = session.get(files_url, params=params, timeout=REQUEST_TIMEOUT)
+        if response.ok:
+            return response.json()
+        print(
+            f"Could not get file list for torrent {torrent_hash}. "
+            + f"Status code: {response.status_code}"
+        )
+        return None
+    except RequestException as e:
+        print(f"Error retrieving torrent files: {e}")
+        return None
+
+
 def set_torrent_seed_limits(
     url,
     torrent_hash,
@@ -219,6 +240,13 @@ def int_field(torrent, field_name, default=0):
         return int(torrent.get(field_name, default))
     except (TypeError, ValueError):
         return default
+
+
+def torrent_total_size(torrent):
+    total_size = int_field(torrent, "total_size", -1)
+    if total_size >= 0:
+        return total_size
+    return int_field(torrent, "size", -1)
 
 
 def get_effective_seed_limit_minutes(torrent):
@@ -284,7 +312,7 @@ def jaccard_similarity(str1, str2):
     return len(set1.intersection(set2)) / len(set1.union(set2))
 
 
-def find_matching_original_torrent(original_torrents, cross_seed_torrent):
+def find_matching_original_torrent_by_name(original_torrents, cross_seed_torrent):
     for original_torrent in original_torrents:
         if (
             jaccard_similarity(
@@ -295,6 +323,81 @@ def find_matching_original_torrent(original_torrents, cross_seed_torrent):
         ):
             return original_torrent
     return None
+
+
+def is_size_window_candidate(original_torrent, cross_seed_torrent):
+    original_size = torrent_total_size(original_torrent)
+    cross_seed_size = torrent_total_size(cross_seed_torrent)
+    if original_size < 0 or cross_seed_size < 0:
+        return False
+
+    extra_bytes = cross_seed_size - original_size
+    return 0 <= extra_bytes <= PARTIAL_MATCH_MAX_EXTRA_BYTES
+
+
+def matches_source_files_with_small_extras(original_files, cross_seed_files):
+    available_sizes = Counter(int_field(file, "size", -1) for file in cross_seed_files)
+    for original_file in original_files:
+        size = int_field(original_file, "size", -1)
+        if available_sizes[size] <= 0:
+            return False
+        available_sizes[size] -= 1
+
+    extra_bytes = sum(
+        size * count for size, count in available_sizes.items() if size > 0
+    )
+    return extra_bytes <= PARTIAL_MATCH_MAX_EXTRA_BYTES
+
+
+def find_matching_original_torrent_by_files(
+    original_torrents,
+    cross_seed_torrent,
+    url,
+):
+    candidates = [
+        torrent
+        for torrent in original_torrents
+        if is_size_window_candidate(torrent, cross_seed_torrent)
+    ]
+    if not candidates:
+        return None
+
+    cross_seed_files = get_torrent_files(url, cross_seed_torrent["hash"])
+    if not cross_seed_files:
+        return None
+
+    matches = []
+    for original_torrent in candidates:
+        original_files = get_torrent_files(url, original_torrent["hash"])
+        if not original_files:
+            continue
+        if matches_source_files_with_small_extras(original_files, cross_seed_files):
+            matches.append(original_torrent)
+
+    if len(matches) == 1:
+        return matches[0]
+
+    if len(matches) > 1:
+        print(
+            "Skipping file-list match for torrent "
+            + f"{cross_seed_torrent['hash']}: {len(matches)} possible sources"
+        )
+    return None
+
+
+def find_matching_original_torrent(original_torrents, cross_seed_torrent, url=None):
+    original_torrent = find_matching_original_torrent_by_name(
+        original_torrents,
+        cross_seed_torrent,
+    )
+    if original_torrent or url is None:
+        return original_torrent
+
+    return find_matching_original_torrent_by_files(
+        original_torrents,
+        cross_seed_torrent,
+        url,
+    )
 
 
 def is_processable_cross_seed(torrent):
@@ -334,7 +437,11 @@ def main():
                 print("---")
                 continue
 
-            original_torrent = find_matching_original_torrent(original_torrents, torrent)
+            original_torrent = find_matching_original_torrent(
+                original_torrents,
+                torrent,
+                QB_URL,
+            )
             if not original_torrent:
                 continue
 
