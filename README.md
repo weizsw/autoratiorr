@@ -1,29 +1,62 @@
-# Video File Processing and Torrent Management System
+# autoratiorr
 
-This system is designed to handle video file processing and manage torrents efficiently. It includes functionality for removing video file extensions, comparing video file names, and managing torrents within specified categories.
+Align qBittorrent share limits for torrents injected by cross-seed.
 
-## Features
+When cross-seed injects a duplicate torrent into qBittorrent, this script finds the
+matching source torrent and sets the cross-seed torrent's `seedingTimeLimit` so the
+two torrents reach their seeding-time limit at the same time.
 
-- **Video File Extension Removal**: Automatically detects and removes common video file extensions from file names.
-- **Name Comparison**: Compares two video file names by removing their extensions and calculating the similarity based on the intersection of words in their names.
-- **Torrent Management**: Connects to a torrent client, reads cache, and processes torrents based on their categories. It also filters torrents by excluding specific categories and tags.
+## Behavior
 
-## Requirements
+- Logs in to qBittorrent Web API.
+- Reads cross-seed torrents from configured categories.
+- Finds matching source torrents outside that category and without the `cross-seed`
+  tag.
+- Calculates the cross-seed torrent's total seed-time limit from qBittorrent's
+  elapsed `seeding_time` fields.
+- Caches only successfully updated torrents so failed or dry-run updates are retried.
 
-- Python 3.x
-- Libraries: `re` for regular expressions
+qBittorrent uses minutes for `setShareLimits` and seconds for elapsed
+`seeding_time`, so the script converts between those units before setting limits.
 
-## Setup
+## Configuration
 
-1. Ensure Python 3.x is installed on your system.
-2. Clone this repository or download the source code.
-3. Install required Python libraries (if any are specified).
-
-## Usage
-
-1. Update the `QB_URL`, `QB_USERNAME`, and `QB_PASSWORD` variables with your torrent client's URL, username, and password.
-2. Define the categories you want to manage in the `CAT_NAMES` variable.
-3. Run the script using Python:
+Required environment variables:
 
 ```bash
+QB_URL=http://localhost:8080
+QB_USERNAME=admin
+QB_PASSWORD=adminadmin
+CAT_NAMES='["cross-seed"]'
+```
+
+`CAT_NAMES` can be a JSON array or a comma-separated string. `CATEGORY_NAME` is also
+accepted as a fallback for single-category setups.
+
+Optional environment variables:
+
+```bash
+DRY_RUN=false
+SCHEDULE=30
+CACHE_EXPIRY_DAYS=14
+CACHE_FILE=torrent_cache.json
+MATCH_THRESHOLD=1
+REQUEST_TIMEOUT=30
+```
+
+Set `SCHEDULE=0` to run once and exit.
+
+## Run Locally
+
+```bash
+uv venv
+source .venv/bin/activate
+uv pip install -r requirements.txt
 python script.py
+```
+
+Run tests:
+
+```bash
+python -m unittest discover -s tests
+```

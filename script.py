@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 import time
@@ -22,16 +23,36 @@ def get_env_variable(var_name):
     return value
 
 
+def get_env_list(var_name, fallback_var_name=None):
+    raw_value = os.getenv(var_name)
+    if raw_value is None and fallback_var_name:
+        raw_value = os.getenv(fallback_var_name)
+    if raw_value is None:
+        raise EnvironmentError(f"The environment variable {var_name} is not set.")
+
+    try:
+        value = json.loads(raw_value)
+    except json.JSONDecodeError:
+        value = raw_value
+
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [item.strip() for item in value.split(",") if item.strip()]
+
+    raise EnvironmentError(f"The environment variable {var_name} must be a list or string.")
+
+
 CACHE_EXPIRY_DAYS = int(os.getenv("CACHE_EXPIRY_DAYS", "14"))
-CACHE_FILE = "torrent_cache.json"
+CACHE_FILE = os.getenv("CACHE_FILE", "torrent_cache.json")
 DRY_RUN = os.getenv("DRY_RUN", "false").lower() in ["true", "1", "t"]
+MATCH_THRESHOLD = float(os.getenv("MATCH_THRESHOLD", "1"))
+REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
 SCHEDULE = int(os.getenv("SCHEDULE", "30"))
 QB_URL = get_env_variable("QB_URL")
 QB_USERNAME = get_env_variable("QB_USERNAME")
 QB_PASSWORD = get_env_variable("QB_PASSWORD")
-CATEGORY_NAME = get_env_variable("CATEGORY_NAME")
-TAG_NAMES = get_env_variable("TAG_NAMES")
-CAT_NAMES = get_env_variable("CAT_NAMES")
+CAT_NAMES = get_env_list("CAT_NAMES", fallback_var_name="CATEGORY_NAME")
 
 session = requests.Session()
 
@@ -75,20 +96,22 @@ def qb_login(url, username, password):
     login_url = f"{url}/api/v2/auth/login"
     data = {"username": username, "password": password}
     try:
-        response = session.post(login_url, data=data)
-        if response.text == "Ok.":
+        response = session.post(login_url, data=data, timeout=REQUEST_TIMEOUT)
+        if response.text.strip() == "Ok.":
             print("Login successful")
-        else:
-            print("Login failed")
+            return True
+        print(f"Login failed. Status code: {response.status_code}")
+        return False
     except RequestException as e:
         print(f"Error logging in: {e}")
+        return False
 
 
 def get_torrents_by_category(url, category_name):
     torrents_url = f"{url}/api/v2/torrents/info"
     params = {"filter": "all", "category": category_name}
     try:
-        response = session.get(torrents_url, params=params)
+        response = session.get(torrents_url, params=params, timeout=REQUEST_TIMEOUT)
         if response.ok:
             torrents = response.json()
             return torrents
@@ -105,7 +128,7 @@ def get_torrents_excluding_category_and_tag(url, category_name, tag_name):
     params = {"filter": "all"}
 
     try:
-        response = session.get(torrents_url, params=params)
+        response = session.get(torrents_url, params=params, timeout=REQUEST_TIMEOUT)
         if response.ok:
             torrents = response.json()
             # Prepare the tag_name to be searched within torrent tags
@@ -133,7 +156,7 @@ def get_torrents_by_tag(url, tag_name):
     torrents_url = f"{url}/api/v2/torrents/info"
     params = {"filter": "all", "tag": tag_name}
     try:
-        response = session.get(torrents_url, params=params)
+        response = session.get(torrents_url, params=params, timeout=REQUEST_TIMEOUT)
         if response.ok:
             torrents = response.json()
             return torrents
@@ -168,18 +191,63 @@ def set_torrent_seed_limits(
             + f"{torrent_hash} with seedingTimeLimit {seed_time} "
             + f"and ratioLimit {share_ratio}"
         )
-        return
+        return False
     try:
-        response = session.post(set_limits_url, headers=headers, data=data)
+        response = session.post(
+            set_limits_url,
+            headers=headers,
+            data=data,
+            timeout=REQUEST_TIMEOUT,
+        )
         if response.ok:
             print(f"Seed limits set for torrent {torrent_hash}")
-        else:
-            print("Failed to set seed limits")
+            return True
+        print(
+            f"Failed to set seed limits for torrent {torrent_hash}. "
+            + f"Status code: {response.status_code}"
+        )
+        return False
     except RequestException as e:
         print(f"Error setting seed limits: {e}")
+        return False
+
+
+def int_field(torrent, field_name, default=0):
+    try:
+        return int(torrent.get(field_name, default))
+    except (TypeError, ValueError):
+        return default
+
+
+def get_effective_seed_limit_minutes(torrent):
+    seed_limit = int_field(torrent, "seeding_time_limit", -2)
+    if seed_limit >= 0:
+        return seed_limit
+
+    max_seeding_seconds = int_field(torrent, "max_seeding_time", seed_limit)
+    if seed_limit == -2 and max_seeding_seconds > 0:
+        return math.ceil(max_seeding_seconds / 60)
+
+    return seed_limit
+
+
+def calculate_aligned_seed_time_limit(original_torrent, cross_seed_torrent):
+    seed_limit = get_effective_seed_limit_minutes(original_torrent)
+    if seed_limit in (-1, -2):
+        return seed_limit
+
+    original_elapsed_seconds = max(0, int_field(original_torrent, "seeding_time", 0))
+    cross_elapsed_seconds = max(0, int_field(cross_seed_torrent, "seeding_time", 0))
+    remaining_seconds = (seed_limit * 60) - original_elapsed_seconds
+    cross_total_limit_seconds = cross_elapsed_seconds + remaining_seconds
+
+    return max(0, math.ceil(cross_total_limit_seconds / 60))
 
 
 def get_time_difference(original_added_on, cross_added_on, seeding_time_limit):
+    if seeding_time_limit in (-1, -2):
+        return seeding_time_limit
+
     # convert epoch time to datetime object
     time = datetime.fromtimestamp(original_added_on)
 
@@ -190,10 +258,10 @@ def get_time_difference(original_added_on, cross_added_on, seeding_time_limit):
     cross_time = datetime.fromtimestamp(cross_added_on)
     time_diff = new_time - cross_time
 
-    # convert the difference to minutes and round it
-    minutes_diff = round(time_diff.total_seconds() / 60)
+    # convert the difference to minutes and round it up
+    minutes_diff = math.ceil(time_diff.total_seconds() / 60)
 
-    return -2 if minutes_diff <= 0 else minutes_diff
+    return max(0, minutes_diff)
 
 
 def jaccard_similarity(str1, str2):
@@ -207,63 +275,77 @@ def jaccard_similarity(str1, str2):
         if str2.lower().endswith(ext):
             str2 = str2[: -len(ext)]
 
-    set1 = set(re.split("[., ]", str1.lower()))
-    set2 = set(re.split("[., ]", str2.lower()))
+    set1 = {part for part in re.split(r"[\W_]+", str1.lower()) if part}
+    set2 = {part for part in re.split(r"[\W_]+", str2.lower()) if part}
+    if not set1 or not set2:
+        return 0
     return len(set1.intersection(set2)) / len(set1.union(set2))
 
 
+def find_matching_original_torrent(original_torrents, cross_seed_torrent):
+    for original_torrent in original_torrents:
+        if (
+            jaccard_similarity(
+                original_torrent["name"],
+                cross_seed_torrent["name"],
+            )
+            >= MATCH_THRESHOLD
+        ):
+            return original_torrent
+    return None
+
+
 def main():
-    qb_login(QB_URL, QB_USERNAME, QB_PASSWORD)
+    if not qb_login(QB_URL, QB_USERNAME, QB_PASSWORD):
+        return
+
     cache = read_cache()
-    updated = False
+    updated_count = 0
     print(f"handling torrents with cat: {CAT_NAMES}")
     for cat_name in CAT_NAMES:
         print(f"handling torrents with cat: {cat_name}")
         cross_seed_torrents = get_torrents_by_category(QB_URL, cat_name)
-        if cross_seed_torrents:
-            for torrent in cross_seed_torrents:
-                if is_torrent_cached(torrent["hash"], cache):
-                    continue
-                print(f"Name: {torrent['name']}")
-                print(f"State: {torrent['state']}")
-                print(f"Hash: {torrent['hash']}")
-                print("---")
-                original_category = cat_name
-                original_torrents = get_torrents_excluding_category_and_tag(
-                    QB_URL,
-                    original_category,
-                    "cross-seed",
-                )
-                if not original_torrents:
-                    continue
-                for original_torrent in original_torrents:
-                    if (
-                        jaccard_similarity(
-                            original_torrent["name"],
-                            torrent["name"],
-                        )
-                        < 1
-                    ):
-                        # original_torrent["name"] != torrent["name"]:
-                        continue
-                    print(f"Found original torrent: {original_torrent['hash']}")
-                    seeding_time_limit = get_time_difference(
-                        original_torrent["completion_on"],
-                        torrent["added_on"],
-                        original_torrent["seeding_time_limit"],
-                    )
-                    set_torrent_seed_limits(
-                        QB_URL,
-                        torrent["hash"],
-                        seeding_time_limit,
-                        -1,
-                        dry_run=DRY_RUN,
-                    )
-                    cache_torrent(torrent["hash"], cache)
-                    updated = True
-                    print("---")
-        if not updated:
-            print("No torrents updated")
+        if not cross_seed_torrents:
+            continue
+
+        original_torrents = get_torrents_excluding_category_and_tag(
+            QB_URL,
+            cat_name,
+            "cross-seed",
+        )
+        if not original_torrents:
+            continue
+
+        for torrent in cross_seed_torrents:
+            if is_torrent_cached(torrent["hash"], cache):
+                continue
+            print(f"Name: {torrent['name']}")
+            print(f"State: {torrent['state']}")
+            print(f"Hash: {torrent['hash']}")
+            print("---")
+
+            original_torrent = find_matching_original_torrent(original_torrents, torrent)
+            if not original_torrent:
+                continue
+
+            print(f"Found original torrent: {original_torrent['hash']}")
+            seeding_time_limit = calculate_aligned_seed_time_limit(
+                original_torrent,
+                torrent,
+            )
+            if set_torrent_seed_limits(
+                QB_URL,
+                torrent["hash"],
+                seeding_time_limit,
+                -1,
+                dry_run=DRY_RUN,
+            ):
+                cache_torrent(torrent["hash"], cache)
+                updated_count += 1
+            print("---")
+
+    if not updated_count:
+        print("No torrents updated")
 
 
 if __name__ == "__main__":
