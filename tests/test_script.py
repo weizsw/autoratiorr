@@ -1,5 +1,6 @@
 import importlib
 import io
+import logging
 import os
 import sys
 import unittest
@@ -22,6 +23,30 @@ def load_script():
     os.environ.update(REQUIRED_ENV)
     sys.modules.pop("script", None)
     return importlib.import_module("script")
+
+
+class LoggingTests(unittest.TestCase):
+    def setUp(self):
+        self.script = load_script()
+
+    def test_configure_logging_formats_human_readable_stdout(self):
+        root_logger = logging.getLogger()
+        old_handlers = root_logger.handlers[:]
+        old_level = root_logger.level
+        stream = io.StringIO()
+
+        try:
+            self.script.configure_logging(stream=stream)
+            self.script.logger.info("Traceable event hash=%s", "abc123")
+        finally:
+            root_logger.handlers[:] = old_handlers
+            root_logger.setLevel(old_level)
+
+        self.assertRegex(
+            stream.getvalue(),
+            r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} "
+            + r"INFO autoratiorr Traceable event hash=abc123\n$",
+        )
 
 
 class AlignmentTests(unittest.TestCase):
@@ -68,6 +93,21 @@ class AlignmentTests(unittest.TestCase):
         self.assertEqual(
             self.script.calculate_aligned_seed_time_limit(source, cross_seed),
             -1,
+        )
+
+    def test_alignment_uses_qbit_global_seed_limit_minutes(self):
+        source = {
+            "seeding_time_limit": -2,
+            "max_seeding_time": 14400,
+            "seeding_time": 60 * 60,
+        }
+        cross_seed = {
+            "seeding_time": 30 * 60,
+        }
+
+        self.assertEqual(
+            self.script.calculate_aligned_seed_time_limit(source, cross_seed),
+            14370,
         )
 
 
@@ -240,6 +280,49 @@ class QbittorrentApiTests(unittest.TestCase):
 class MainLoopTests(unittest.TestCase):
     def setUp(self):
         self.script = load_script()
+
+    def test_main_logs_cross_seed_context_for_successful_update(self):
+        cross_seed = {
+            "hash": "crosshash",
+            "name": "Movie.2024.1080p",
+            "state": "uploading",
+            "seeding_time": 0,
+        }
+        source = {
+            "hash": "sourcehash",
+            "name": "Movie.2024.1080p",
+            "seeding_time_limit": 60,
+            "seeding_time": 600,
+            "tags": "",
+            "category": "movies",
+        }
+
+        with (
+            patch.object(self.script, "qb_login", return_value=True),
+            patch.object(self.script, "read_cache", return_value={}),
+            patch.object(self.script, "get_torrents_by_category", return_value=[cross_seed]),
+            patch.object(
+                self.script,
+                "get_torrents_excluding_category_and_tag",
+                return_value=[source],
+            ),
+            patch.object(self.script, "set_torrent_seed_limits", return_value=True),
+            patch.object(self.script, "cache_torrent"),
+            self.assertLogs("autoratiorr", level="INFO") as logs,
+        ):
+            self.script.main()
+
+        log_output = "\n".join(logs.output)
+        self.assertIn(
+            "Processing cross-seed torrent category=cross-seed "
+            + "name='Movie.2024.1080p' hash=crosshash state=uploading",
+            log_output,
+        )
+        self.assertIn(
+            "Calculated seed limit cross_seed_hash=crosshash "
+            + "source_hash=sourcehash seed_limit_minutes=50",
+            log_output,
+        )
 
     def test_unhealthy_cross_seed_state_is_not_processed_or_cached(self):
         source = {

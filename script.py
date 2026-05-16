@@ -1,7 +1,9 @@
 import json
+import logging
 import math
 import os
 import re
+import sys
 import time
 from collections import Counter
 from datetime import datetime, timedelta
@@ -53,14 +55,29 @@ PARTIAL_MATCH_MAX_EXTRA_BYTES = int(
 )
 REQUEST_TIMEOUT = int(os.getenv("REQUEST_TIMEOUT", "30"))
 SCHEDULE = int(os.getenv("SCHEDULE", "30"))
+LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
 QB_URL = get_env_variable("QB_URL")
 QB_USERNAME = get_env_variable("QB_USERNAME")
 QB_PASSWORD = get_env_variable("QB_PASSWORD")
 CAT_NAMES = get_env_list("CAT_NAMES", fallback_var_name="CATEGORY_NAME")
 
 session = requests.Session()
+logger = logging.getLogger("autoratiorr")
+if not any(isinstance(handler, logging.NullHandler) for handler in logger.handlers):
+    logger.addHandler(logging.NullHandler())
 
 UNHEALTHY_CROSS_SEED_STATES = {"error", "missingFiles"}
+
+
+def configure_logging(stream=None):
+    level = getattr(logging, LOG_LEVEL, logging.INFO)
+    logging.basicConfig(
+        level=level,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+        stream=stream or sys.stdout,
+        force=True,
+    )
 
 
 def read_cache():
@@ -104,12 +121,12 @@ def qb_login(url, username, password):
     try:
         response = session.post(login_url, data=data, timeout=REQUEST_TIMEOUT)
         if response.text.strip() == "Ok.":
-            print("Login successful")
+            logger.info("Login successful")
             return True
-        print(f"Login failed. Status code: {response.status_code}")
+        logger.error("Login failed status_code=%s", response.status_code)
         return False
-    except RequestException as e:
-        print(f"Error logging in: {e}")
+    except RequestException:
+        logger.exception("Error logging in")
         return False
 
 
@@ -122,10 +139,14 @@ def get_torrents_by_category(url, category_name):
             torrents = response.json()
             return torrents
         else:
-            print("Could not get torrent list")
+            logger.error(
+                "Could not get torrent list category=%s status_code=%s",
+                category_name,
+                response.status_code,
+            )
             return None
-    except RequestException as e:
-        print(f"Error retrieving torrents: {e}")
+    except RequestException:
+        logger.exception("Error retrieving torrents category=%s", category_name)
         return None
 
 
@@ -151,10 +172,20 @@ def get_torrents_excluding_category_and_tag(url, category_name, tag_name):
             ]
             return filtered_torrents
         else:
-            print("Could not get torrent list. Status code:", response.status_code)
+            logger.error(
+                "Could not get torrent list excluded_category=%s "
+                + "excluded_tag=%s status_code=%s",
+                category_name,
+                tag_name,
+                response.status_code,
+            )
             return None
-    except requests.RequestException as e:
-        print(f"Error retrieving torrents: {e}")
+    except requests.RequestException:
+        logger.exception(
+            "Error retrieving torrents excluded_category=%s excluded_tag=%s",
+            category_name,
+            tag_name,
+        )
         return None
 
 
@@ -167,10 +198,14 @@ def get_torrents_by_tag(url, tag_name):
             torrents = response.json()
             return torrents
         else:
-            print("Could not get torrent list")
+            logger.error(
+                "Could not get torrent list tag=%s status_code=%s",
+                tag_name,
+                response.status_code,
+            )
             return None
-    except RequestException as e:
-        print(f"Error retrieving torrents: {e}")
+    except RequestException:
+        logger.exception("Error retrieving torrents tag=%s", tag_name)
         return None
 
 
@@ -181,13 +216,14 @@ def get_torrent_files(url, torrent_hash):
         response = session.get(files_url, params=params, timeout=REQUEST_TIMEOUT)
         if response.ok:
             return response.json()
-        print(
-            f"Could not get file list for torrent {torrent_hash}. "
-            + f"Status code: {response.status_code}"
+        logger.error(
+            "Could not get file list hash=%s status_code=%s",
+            torrent_hash,
+            response.status_code,
         )
         return None
-    except RequestException as e:
-        print(f"Error retrieving torrent files: {e}")
+    except RequestException:
+        logger.exception("Error retrieving torrent files hash=%s", torrent_hash)
         return None
 
 
@@ -209,10 +245,12 @@ def set_torrent_seed_limits(
         "inactiveSeedingTimeLimit": -1,
     }
     if dry_run:
-        print(
-            "Dry run: Would set seed limits for torrent "
-            + f"{torrent_hash} with seedingTimeLimit {seed_time} "
-            + f"and ratioLimit {share_ratio}"
+        logger.info(
+            "Dry run: would set seed limits hash=%s "
+            + "seeding_time_limit=%s ratio_limit=%s",
+            torrent_hash,
+            seed_time,
+            share_ratio,
         )
         return False
     try:
@@ -223,15 +261,21 @@ def set_torrent_seed_limits(
             timeout=REQUEST_TIMEOUT,
         )
         if response.ok:
-            print(f"Seed limits set for torrent {torrent_hash}")
+            logger.info(
+                "Seed limits set hash=%s seeding_time_limit=%s ratio_limit=%s",
+                torrent_hash,
+                seed_time,
+                share_ratio,
+            )
             return True
-        print(
-            f"Failed to set seed limits for torrent {torrent_hash}. "
-            + f"Status code: {response.status_code}"
+        logger.error(
+            "Failed to set seed limits hash=%s status_code=%s",
+            torrent_hash,
+            response.status_code,
         )
         return False
-    except RequestException as e:
-        print(f"Error setting seed limits: {e}")
+    except RequestException:
+        logger.exception("Error setting seed limits hash=%s", torrent_hash)
         return False
 
 
@@ -254,9 +298,9 @@ def get_effective_seed_limit_minutes(torrent):
     if seed_limit >= 0:
         return seed_limit
 
-    max_seeding_seconds = int_field(torrent, "max_seeding_time", seed_limit)
-    if seed_limit == -2 and max_seeding_seconds > 0:
-        return math.ceil(max_seeding_seconds / 60)
+    max_seeding_minutes = int_field(torrent, "max_seeding_time", seed_limit)
+    if seed_limit == -2 and max_seeding_minutes > 0:
+        return max_seeding_minutes
 
     return seed_limit
 
@@ -378,9 +422,11 @@ def find_matching_original_torrent_by_files(
         return matches[0]
 
     if len(matches) > 1:
-        print(
-            "Skipping file-list match for torrent "
-            + f"{cross_seed_torrent['hash']}: {len(matches)} possible sources"
+        logger.warning(
+            "Skipping file-list match: ambiguous source "
+            + "cross_seed_hash=%s possible_sources=%s",
+            cross_seed_torrent["hash"],
+            len(matches),
         )
     return None
 
@@ -410,11 +456,12 @@ def main():
 
     cache = read_cache()
     updated_count = 0
-    print(f"handling torrents with cat: {CAT_NAMES}")
+    logger.info("Processing categories categories=%s", CAT_NAMES)
     for cat_name in CAT_NAMES:
-        print(f"handling torrents with cat: {cat_name}")
+        logger.info("Processing category category=%s", cat_name)
         cross_seed_torrents = get_torrents_by_category(QB_URL, cat_name)
         if not cross_seed_torrents:
+            logger.info("No cross-seed torrents found category=%s", cat_name)
             continue
 
         original_torrents = get_torrents_excluding_category_and_tag(
@@ -423,18 +470,33 @@ def main():
             "cross-seed",
         )
         if not original_torrents:
+            logger.warning("No source torrents available category=%s", cat_name)
             continue
 
         for torrent in cross_seed_torrents:
             if is_torrent_cached(torrent["hash"], cache):
+                logger.debug(
+                    "Skipping cached torrent category=%s name=%r hash=%s",
+                    cat_name,
+                    torrent["name"],
+                    torrent["hash"],
+                )
                 continue
-            print(f"Name: {torrent['name']}")
-            print(f"State: {torrent['state']}")
-            print(f"Hash: {torrent['hash']}")
-            print("---")
+            logger.info(
+                "Processing cross-seed torrent category=%s name=%r hash=%s state=%s",
+                cat_name,
+                torrent["name"],
+                torrent["hash"],
+                torrent["state"],
+            )
             if not is_processable_cross_seed(torrent):
-                print(f"Skipping unhealthy cross-seed torrent: {torrent['state']}")
-                print("---")
+                logger.warning(
+                    "Skipping unhealthy cross-seed torrent "
+                    + "category=%s hash=%s state=%s",
+                    cat_name,
+                    torrent["hash"],
+                    torrent["state"],
+                )
                 continue
 
             original_torrent = find_matching_original_torrent(
@@ -443,12 +505,29 @@ def main():
                 QB_URL,
             )
             if not original_torrent:
+                logger.info(
+                    "No matching source torrent category=%s name=%r hash=%s",
+                    cat_name,
+                    torrent["name"],
+                    torrent["hash"],
+                )
                 continue
 
-            print(f"Found original torrent: {original_torrent['hash']}")
             seeding_time_limit = calculate_aligned_seed_time_limit(
                 original_torrent,
                 torrent,
+            )
+            logger.info(
+                "Calculated seed limit cross_seed_hash=%s source_hash=%s "
+                + "seed_limit_minutes=%s source_limit=%s source_max=%s "
+                + "cross_seed_elapsed_seconds=%s source_elapsed_seconds=%s",
+                torrent["hash"],
+                original_torrent["hash"],
+                seeding_time_limit,
+                original_torrent.get("seeding_time_limit"),
+                original_torrent.get("max_seeding_time"),
+                torrent.get("seeding_time"),
+                original_torrent.get("seeding_time"),
             )
             if set_torrent_seed_limits(
                 QB_URL,
@@ -459,17 +538,17 @@ def main():
             ):
                 cache_torrent(torrent["hash"], cache)
                 updated_count += 1
-            print("---")
 
     if not updated_count:
-        print("No torrents updated")
+        logger.info("No torrents updated")
 
 
 if __name__ == "__main__":
+    configure_logging()
     if SCHEDULE > 0:
         while True:
             main()
-            print(f"Waiting for {SCHEDULE} minutes before next run.")
+            logger.info("Waiting for next run schedule_minutes=%s", SCHEDULE)
             time.sleep(SCHEDULE * 60)
     else:
         main()
