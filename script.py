@@ -513,6 +513,18 @@ def main():
                 )
                 continue
 
+            if (
+                original_torrent.get("category") == "whisparr"
+                and int_field(original_torrent, "seeding_time", -1) == 0
+            ):
+                logger.info(
+                    "Skipping seed alignment for whisparr source with zero "
+                    + "seeding time cross_seed_hash=%s source_hash=%s",
+                    torrent["hash"],
+                    original_torrent["hash"],
+                )
+                continue
+
             seeding_time_limit = calculate_aligned_seed_time_limit(
                 original_torrent,
                 torrent,

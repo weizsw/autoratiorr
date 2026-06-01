@@ -400,6 +400,40 @@ class MainLoopTests(unittest.TestCase):
 
         cache_torrent.assert_not_called()
 
+    def test_whisparr_source_with_zero_seeding_time_is_not_aligned(self):
+        cross_seed = {
+            "hash": "crosshash",
+            "name": "Movie.2024.1080p",
+            "state": "uploading",
+            "seeding_time": 0,
+        }
+        source = {
+            "hash": "sourcehash",
+            "name": "Movie.2024.1080p",
+            "seeding_time_limit": 0,
+            "seeding_time": 0,
+            "tags": "",
+            "category": "whisparr",
+        }
+
+        with (
+            patch.object(self.script, "qb_login", return_value=True),
+            patch.object(self.script, "read_cache", return_value={}),
+            patch.object(self.script, "get_torrents_by_category", return_value=[cross_seed]),
+            patch.object(
+                self.script,
+                "get_torrents_excluding_category_and_tag",
+                return_value=[source],
+            ),
+            patch.object(self.script, "set_torrent_seed_limits") as set_limits,
+            patch.object(self.script, "cache_torrent") as cache_torrent,
+            redirect_stdout(io.StringIO()),
+        ):
+            self.script.main()
+
+        set_limits.assert_not_called()
+        cache_torrent.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()
