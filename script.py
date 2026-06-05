@@ -513,17 +513,23 @@ def main():
                 )
                 continue
 
-            if (
-                original_torrent.get("category") == "whisparr"
-                and int_field(original_torrent, "seeding_time", -1) == 0
-            ):
-                logger.info(
-                    "Skipping seed alignment for whisparr source with zero "
-                    + "seeding time cross_seed_hash=%s source_hash=%s",
-                    torrent["hash"],
-                    original_torrent["hash"],
-                )
-                continue
+            if original_torrent.get("category") == "whisparr":
+                source_tags = [
+                    tag.strip() for tag in original_torrent.get("tags", "").split(",")
+                ]
+                if int_field(original_torrent, "seeding_time", -1) == 0 or (
+                    "other" in source_tags
+                ):
+                    logger.info(
+                        "Skipping seed alignment for whisparr source "
+                        + "cross_seed_hash=%s source_hash=%s source_seeding_time=%s "
+                        + "source_tags=%s",
+                        torrent["hash"],
+                        original_torrent["hash"],
+                        original_torrent.get("seeding_time"),
+                        original_torrent.get("tags"),
+                    )
+                    continue
 
             seeding_time_limit = calculate_aligned_seed_time_limit(
                 original_torrent,
