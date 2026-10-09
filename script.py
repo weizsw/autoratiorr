@@ -120,7 +120,9 @@ def qb_login(url, username, password):
     data = {"username": username, "password": password}
     try:
         response = session.post(login_url, data=data, timeout=REQUEST_TIMEOUT)
-        if response.text.strip() == "Ok.":
+        if response.status_code == 204 or (
+            response.status_code == 200 and response.text.strip() == "Ok."
+        ):
             logger.info("Login successful")
             return True
         logger.error("Login failed status_code=%s", response.status_code)

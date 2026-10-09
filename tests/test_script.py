@@ -240,6 +240,57 @@ class QbittorrentApiTests(unittest.TestCase):
     def setUp(self):
         self.script = load_script()
 
+    def test_login_accepts_legacy_ok_response(self):
+        fake_session = Mock()
+        fake_session.post.return_value = Mock(status_code=200, text="Ok.\n")
+
+        with patch.object(self.script, "session", fake_session):
+            result = self.script.qb_login("http://qbittorrent.local", "user", "pass")
+
+        self.assertIs(result, True)
+        fake_session.post.assert_called_once_with(
+            "http://qbittorrent.local/api/v2/auth/login",
+            data={"username": "user", "password": "pass"},
+            timeout=self.script.REQUEST_TIMEOUT,
+        )
+
+    def test_login_accepts_qbit_5_2_no_content_response(self):
+        fake_session = Mock()
+        fake_session.post.return_value = Mock(status_code=204, text="")
+
+        with patch.object(self.script, "session", fake_session):
+            result = self.script.qb_login("http://qbittorrent.local", "user", "pass")
+
+        self.assertIs(result, True)
+
+    def test_login_rejects_failed_or_unexpected_responses(self):
+        for status_code, text in (
+            (200, "Fails."),
+            (200, ""),
+            (401, "Unauthorized"),
+            (403, "Forbidden"),
+            (500, "Ok."),
+        ):
+            with self.subTest(status_code=status_code, text=text):
+                fake_session = Mock()
+                fake_session.post.return_value = Mock(status_code=status_code, text=text)
+
+                with patch.object(self.script, "session", fake_session):
+                    result = self.script.qb_login(
+                        "http://qbittorrent.local", "user", "pass"
+                    )
+
+                self.assertIs(result, False)
+
+    def test_login_returns_false_for_read_timeout(self):
+        fake_session = Mock()
+        fake_session.post.side_effect = self.script.requests.exceptions.ReadTimeout()
+
+        with patch.object(self.script, "session", fake_session):
+            result = self.script.qb_login("http://qbittorrent.local", "user", "pass")
+
+        self.assertIs(result, False)
+
     def test_set_torrent_seed_limits_returns_true_only_for_successful_update(self):
         response = Mock(ok=True)
         fake_session = Mock()
