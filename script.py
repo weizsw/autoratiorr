@@ -168,6 +168,7 @@ def get_torrents_excluding_category_and_tag(url, category_name, tag_name):
                 for torrent in torrents
                 if (
                     torrent.get("category") != category_name
+                    and not torrent.get("category", "").startswith(category_name + "/")
                     and tag_to_exclude
                     not in [tag.strip() for tag in torrent.get("tags", "").split(",")]
                 )
@@ -235,6 +236,7 @@ def set_torrent_seed_limits(
     seed_time,
     share_ratio,
     dry_run=False,
+    share_limit_action="Default",
 ):
     set_limits_url = f"{url}/api/v2/torrents/setShareLimits"
     headers = {
@@ -245,6 +247,8 @@ def set_torrent_seed_limits(
         "seedingTimeLimit": seed_time,
         "ratioLimit": share_ratio,
         "inactiveSeedingTimeLimit": -1,
+        # Required by qBittorrent 5.2; preserve the torrent's existing action.
+        "shareLimitAction": share_limit_action,
     }
     if dry_run:
         logger.info(
@@ -301,7 +305,7 @@ def get_effective_seed_limit_minutes(torrent):
         return seed_limit
 
     max_seeding_minutes = int_field(torrent, "max_seeding_time", seed_limit)
-    if seed_limit == -2 and max_seeding_minutes > 0:
+    if seed_limit == -2 and max_seeding_minutes >= -1:
         return max_seeding_minutes
 
     return seed_limit
@@ -555,6 +559,7 @@ def main():
                 seeding_time_limit,
                 -1,
                 dry_run=DRY_RUN,
+                share_limit_action=torrent.get("share_limit_action", "Default"),
             ):
                 cache_torrent(torrent["hash"], cache)
                 updated_count += 1

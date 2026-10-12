@@ -95,6 +95,28 @@ class AlignmentTests(unittest.TestCase):
             -1,
         )
 
+    def test_alignment_resolves_inherited_unlimited_and_zero_limits(self):
+        for max_limit, cross_elapsed, expected in ((-1, 180, -1), (0, 0, 0), (0, 180, 3)):
+            with self.subTest(max_limit=max_limit, cross_elapsed=cross_elapsed):
+                source = {
+                    "seeding_time_limit": -2,
+                    "max_seeding_time": max_limit,
+                    "seeding_time": 0,
+                }
+                cross_seed = {"seeding_time": cross_elapsed}
+                self.assertEqual(
+                    self.script.calculate_aligned_seed_time_limit(source, cross_seed),
+                    expected,
+                )
+
+    def test_alignment_preserves_default_when_effective_limit_is_unavailable(self):
+        self.assertEqual(
+            self.script.calculate_aligned_seed_time_limit(
+                {"seeding_time_limit": -2}, {"seeding_time": 180}
+            ),
+            -2,
+        )
+
     def test_alignment_uses_qbit_global_seed_limit_minutes(self):
         source = {
             "seeding_time_limit": -2,
@@ -291,6 +313,35 @@ class QbittorrentApiTests(unittest.TestCase):
 
         self.assertIs(result, False)
 
+    def test_source_query_excludes_cross_seed_subcategories_and_tags(self):
+        torrents = [
+            {"hash": "root", "category": "cross-seed", "tags": ""},
+            {"hash": "child", "category": "cross-seed/link", "tags": ""},
+            {"hash": "nested", "category": "cross-seed/link/child", "tags": ""},
+            {"hash": "tagged", "category": "movies", "tags": "other, cross-seed"},
+            {"hash": "source", "category": "movies", "tags": "other"},
+            {"hash": "similar-prefix", "category": "cross-seed-other", "tags": ""},
+            {"hash": "uncategorized", "category": "", "tags": ""},
+        ]
+        fake_session = Mock()
+        fake_session.get.return_value = Mock(ok=True)
+        fake_session.get.return_value.json.return_value = torrents
+
+        with patch.object(self.script, "session", fake_session):
+            result = self.script.get_torrents_excluding_category_and_tag(
+                "http://qbittorrent.local", "cross-seed", "cross-seed"
+            )
+
+        self.assertEqual(
+            [torrent["hash"] for torrent in result],
+            ["source", "similar-prefix", "uncategorized"],
+        )
+        fake_session.get.assert_called_once_with(
+            "http://qbittorrent.local/api/v2/torrents/info",
+            params={"filter": "all"},
+            timeout=self.script.REQUEST_TIMEOUT,
+        )
+
     def test_set_torrent_seed_limits_returns_true_only_for_successful_update(self):
         response = Mock(ok=True)
         fake_session = Mock()
@@ -308,6 +359,40 @@ class QbittorrentApiTests(unittest.TestCase):
             )
 
         self.assertIs(result, True)
+
+    def test_set_torrent_seed_limits_satisfies_qbit_5_2_required_parameters(self):
+        # Mirrors requireParams() in qBittorrent release-5.2.3's
+        # src/webui/api/torrentscontroller.cpp::setShareLimitsAction().
+        required = {
+            "hashes",
+            "ratioLimit",
+            "seedingTimeLimit",
+            "inactiveSeedingTimeLimit",
+            "shareLimitAction",
+        }
+
+        def validate_request(_url, **kwargs):
+            missing = required - kwargs["data"].keys()
+            return Mock(ok=not missing, status_code=400 if missing else 200)
+
+        fake_session = Mock()
+        fake_session.post.side_effect = validate_request
+        with patch.object(self.script, "session", fake_session):
+            result = self.script.set_torrent_seed_limits(
+                "http://qbittorrent.local", "abc123", 5742, -1
+            )
+
+        self.assertIs(result, True)
+        self.assertEqual(
+            fake_session.post.call_args.kwargs["data"],
+            {
+                "hashes": "abc123",
+                "seedingTimeLimit": 5742,
+                "ratioLimit": -1,
+                "inactiveSeedingTimeLimit": -1,
+                "shareLimitAction": "Default",
+            },
+        )
 
     def test_set_torrent_seed_limits_returns_false_for_dry_run(self):
         fake_session = Mock()
@@ -338,7 +423,10 @@ class MainLoopTests(unittest.TestCase):
             "name": "Movie.2024.1080p",
             "state": "uploading",
             "seeding_time": 0,
+            "share_limit_action": "Stop",
         }
+        fake_session = Mock()
+        fake_session.post.return_value = Mock(ok=True)
         source = {
             "hash": "sourcehash",
             "name": "Movie.2024.1080p",
@@ -357,12 +445,16 @@ class MainLoopTests(unittest.TestCase):
                 "get_torrents_excluding_category_and_tag",
                 return_value=[source],
             ),
-            patch.object(self.script, "set_torrent_seed_limits", return_value=True),
+            patch.object(self.script, "session", fake_session),
             patch.object(self.script, "cache_torrent"),
             self.assertLogs("autoratiorr", level="INFO") as logs,
         ):
             self.script.main()
 
+        self.assertEqual(
+            fake_session.post.call_args.kwargs["data"]["shareLimitAction"],
+            "Stop",
+        )
         log_output = "\n".join(logs.output)
         self.assertIn(
             "Processing cross-seed torrent category=cross-seed "

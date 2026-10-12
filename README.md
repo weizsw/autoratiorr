@@ -10,8 +10,8 @@ two torrents reach their seeding-time limit at the same time.
 
 - Logs in to qBittorrent Web API.
 - Reads cross-seed torrents from configured categories.
-- Finds matching source torrents outside that category and without the `cross-seed`
-  tag.
+- Finds matching source torrents outside that category and its subcategories,
+  and without the `cross-seed` tag.
 - Falls back to qBittorrent file-list matching when torrent names differ. The
   fallback first narrows candidates by total size, then matches file sizes while
   allowing small extra files on the injected torrent.
@@ -23,6 +23,24 @@ two torrents reach their seeding-time limit at the same time.
 
 qBittorrent uses minutes for `setShareLimits` and seconds for elapsed
 `seeding_time`, so the script converts between those units before setting limits.
+
+## qBittorrent Compatibility
+
+Checked against qBittorrent **5.2.3** using an isolated official container and
+synthetic torrents: login/session cookies, category/tag queries, file-list
+matching, share-limit writes/read-back, elapsed-time alignment, dry-run, and
+successful-update caching.
+
+- `setShareLimits` includes the required `shareLimitAction`, preserving the
+  cross-seed torrent's existing action.
+- Inherited source limits use `max_seeding_time`, which resolves category/global
+  settings, including unlimited (`-1`) and zero-minute limits.
+- Source exclusion mirrors category queries, which include subcategories.
+
+Contracts were verified against the
+[5.2.3 API handlers](https://github.com/qbittorrent/qBittorrent/blob/release-5.2.3/src/webui/api/torrentscontroller.cpp)
+and [torrent serialization](https://github.com/qbittorrent/qBittorrent/blob/release-5.2.3/src/webui/api/serialize/serialize_torrent.cpp).
+This does not verify a deployment's proxy or authentication configuration.
 
 ## Configuration
 
