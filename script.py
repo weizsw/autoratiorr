@@ -173,6 +173,14 @@ def get_torrents_excluding_category_and_tag(url, category_name, tag_name):
                     not in [tag.strip() for tag in torrent.get("tags", "").split(",")]
                 )
             ]
+            logger.info(
+                "Source torrent pool excluded_category=%s excluded_tag=%s "
+                + "total_torrents=%s eligible_sources=%s",
+                category_name,
+                tag_name,
+                len(torrents),
+                len(filtered_torrents),
+            )
             return filtered_torrents
         else:
             logger.error(
@@ -381,22 +389,29 @@ def is_size_window_candidate(original_torrent, cross_seed_torrent):
     if original_size < 0 or cross_seed_size < 0:
         return False
 
-    extra_bytes = cross_seed_size - original_size
-    return 0 <= extra_bytes <= PARTIAL_MATCH_MAX_EXTRA_BYTES
+    return abs(cross_seed_size - original_size) <= PARTIAL_MATCH_MAX_EXTRA_BYTES
 
 
 def matches_source_files_with_small_extras(original_files, cross_seed_files):
-    available_sizes = Counter(int_field(file, "size", -1) for file in cross_seed_files)
-    for original_file in original_files:
-        size = int_field(original_file, "size", -1)
-        if available_sizes[size] <= 0:
-            return False
-        available_sizes[size] -= 1
+    original_sizes = Counter(int_field(file, "size", -1) for file in original_files)
+    cross_seed_sizes = Counter(int_field(file, "size", -1) for file in cross_seed_files)
+    if any(size < 0 for size in original_sizes.keys() | cross_seed_sizes.keys()):
+        return False
 
-    extra_bytes = sum(
-        size * count for size, count in available_sizes.items() if size > 0
+    shared_sizes = original_sizes & cross_seed_sizes
+    shared_bytes = sum(size * count for size, count in shared_sizes.items())
+    original_extra_bytes = sum(
+        size * count for size, count in (original_sizes - shared_sizes).items()
     )
-    return extra_bytes <= PARTIAL_MATCH_MAX_EXTRA_BYTES
+    cross_seed_extra_bytes = sum(
+        size * count for size, count in (cross_seed_sizes - shared_sizes).items()
+    )
+    largest_extra_bytes = max(original_extra_bytes, cross_seed_extra_bytes)
+    # Shared content must dominate both torrents; a shared NFO is insufficient.
+    return (
+        shared_bytes > largest_extra_bytes
+        and largest_extra_bytes <= PARTIAL_MATCH_MAX_EXTRA_BYTES
+    )
 
 
 def find_matching_original_torrent_by_files(
@@ -410,19 +425,44 @@ def find_matching_original_torrent_by_files(
         if is_size_window_candidate(torrent, cross_seed_torrent)
     ]
     if not candidates:
+        logger.info(
+            "Source match failed reason=no_size_candidates cross_seed_hash=%s "
+            + "cross_seed_size=%s source_count=%s max_extra_bytes=%s",
+            cross_seed_torrent["hash"],
+            torrent_total_size(cross_seed_torrent),
+            len(original_torrents),
+            PARTIAL_MATCH_MAX_EXTRA_BYTES,
+        )
         return None
 
     cross_seed_files = get_torrent_files(url, cross_seed_torrent["hash"])
     if not cross_seed_files:
+        logger.warning(
+            "Source match failed reason=cross_seed_files_unavailable "
+            + "cross_seed_hash=%s size_candidates=%s",
+            cross_seed_torrent["hash"],
+            len(candidates),
+        )
         return None
 
     matches = []
+    unavailable_file_lists = 0
     for original_torrent in candidates:
         original_files = get_torrent_files(url, original_torrent["hash"])
         if not original_files:
+            unavailable_file_lists += 1
             continue
         if matches_source_files_with_small_extras(original_files, cross_seed_files):
             matches.append(original_torrent)
+        else:
+            logger.debug(
+                "Source file mismatch cross_seed_hash=%s source_hash=%s "
+                + "source_name=%r source_size=%s",
+                cross_seed_torrent["hash"],
+                original_torrent["hash"],
+                original_torrent["name"],
+                torrent_total_size(original_torrent),
+            )
 
     if len(matches) == 1:
         return matches[0]
@@ -433,6 +473,15 @@ def find_matching_original_torrent_by_files(
             + "cross_seed_hash=%s possible_sources=%s",
             cross_seed_torrent["hash"],
             len(matches),
+        )
+    else:
+        logger.info(
+            "Source match failed reason=no_file_match cross_seed_hash=%s "
+            + "size_candidates=%s unavailable_file_lists=%s max_extra_bytes=%s",
+            cross_seed_torrent["hash"],
+            len(candidates),
+            unavailable_file_lists,
+            PARTIAL_MATCH_MAX_EXTRA_BYTES,
         )
     return None
 

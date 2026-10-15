@@ -13,8 +13,10 @@ two torrents reach their seeding-time limit at the same time.
 - Finds matching source torrents outside that category and its subcategories,
   and without the `cross-seed` tag.
 - Falls back to qBittorrent file-list matching when torrent names differ. The
-  fallback first narrows candidates by total size, then matches file sizes while
-  allowing small extra files on the injected torrent.
+  fallback first narrows candidates by total-size difference, then matches file
+  sizes while allowing small extra files on either torrent. Unmatched bytes on
+  each side must stay within `PARTIAL_MATCH_MAX_EXTRA_BYTES`, and shared files
+  must account for more bytes than the unmatched files on either side.
 - Skips file-list fallback matches when multiple source torrents match, so seed
   limits are not aligned to an ambiguous source.
 - Calculates the cross-seed torrent's total seed-time limit from qBittorrent's
@@ -70,6 +72,32 @@ LOG_LEVEL=INFO
 ```
 
 Set `SCHEDULE=0` to run once and exit.
+
+## Troubleshoot Unmatched Torrents
+
+`stoppedUP` and `stalledUP` torrents are processed normally. A
+`No matching source torrent` message means neither name matching nor file-list
+matching found a unique source under the current rules:
+
+- Sources must be in the same qBittorrent instance, outside the processed category
+  and its subcategories, and without the `cross-seed` tag. The `Source torrent
+  pool` log reports total torrents and eligible sources.
+- `MATCH_THRESHOLD=1` requires identical sets of name tokens after case,
+  punctuation, and common video extensions are normalized.
+- `reason=no_size_candidates` means no eligible source has a total size within
+  `PARTIAL_MATCH_MAX_EXTRA_BYTES` of the injected torrent (50 MiB by default).
+- `reason=cross_seed_files_unavailable` means the injected torrent's file list
+  could not be read or was empty.
+- `reason=no_file_match` means no source file list matched. Check
+  `unavailable_file_lists` for source file-list retrieval failures.
+- `ambiguous source` means multiple source file lists matched, so the script
+  skipped alignment.
+
+For a diagnostic run, set `DRY_RUN=true`, `SCHEDULE=0`, and `LOG_LEVEL=DEBUG`.
+DEBUG output includes rejected file-list candidates with source hashes and names.
+If a torrent remains unmatched, compare its source and injected torrent names,
+categories, tags, total sizes, and file lists. Torrents injected from standalone
+files may have no source torrent in qBittorrent to align with.
 
 ## Run Locally
 

@@ -169,6 +169,194 @@ class MatchingTests(unittest.TestCase):
 
         self.assertEqual(match, source)
 
+    def test_renamed_cross_seed_matches_when_source_has_small_extra_files(self):
+        cross_seed = {
+            "hash": "crosshash",
+            "name": "Tracker.Release",
+            "size": 1_000,
+        }
+        source = {
+            "hash": "sourcehash",
+            "name": "Original.Release",
+            "size": 1_050,
+        }
+        files = {
+            "crosshash": [{"name": "renamed.mkv", "size": 1_000}],
+            "sourcehash": [
+                {"name": "feature.mkv", "size": 1_000},
+                {"name": "release.nfo", "size": 50},
+            ],
+        }
+
+        with patch.object(
+            self.script,
+            "get_torrent_files",
+            side_effect=lambda _url, torrent_hash: files[torrent_hash],
+        ):
+            match = self.script.find_matching_original_torrent(
+                [source], cross_seed, "http://qbittorrent.local"
+            )
+
+        self.assertEqual(match, source)
+
+    def test_renamed_cross_seed_matches_when_both_have_different_small_extras(self):
+        cross_seed = {
+            "hash": "crosshash",
+            "name": "Tracker.Release",
+            "size": 1_040,
+        }
+        source = {
+            "hash": "sourcehash",
+            "name": "Original.Release",
+            "size": 1_030,
+        }
+        files = {
+            "crosshash": [
+                {"name": "renamed.mkv", "size": 1_000},
+                {"name": "tracker.nfo", "size": 40},
+            ],
+            "sourcehash": [
+                {"name": "feature.mkv", "size": 1_000},
+                {"name": "release.nfo", "size": 30},
+            ],
+        }
+
+        with patch.object(
+            self.script,
+            "get_torrent_files",
+            side_effect=lambda _url, torrent_hash: files[torrent_hash],
+        ):
+            match = self.script.find_matching_original_torrent(
+                [source], cross_seed, "http://qbittorrent.local"
+            )
+
+        self.assertEqual(match, source)
+
+    def test_file_match_requires_shared_content_and_limits_extras_on_both_sides(self):
+        cases = [
+            (
+                "different content with identical total size",
+                [{"size": 1_000}],
+                [{"size": 600}, {"size": 400}],
+            ),
+            (
+                "too many unmatched bytes in source",
+                [{"size": 1_000}, {"size": 101}],
+                [{"size": 1_000}],
+            ),
+            (
+                "too many unmatched bytes in cross seed",
+                [{"size": 1_000}],
+                [{"size": 1_000}, {"size": 101}],
+            ),
+            (
+                "repeated sizes need separate matches",
+                [{"size": 1_000}, {"size": 1_000}],
+                [{"size": 1_000}],
+            ),
+            (
+                "a shared small file cannot identify different main content",
+                [{"size": 60}, {"size": 1}],
+                [{"size": 70}, {"size": 1}],
+            ),
+            ("empty file lists", [], []),
+            ("only empty files", [{"size": 0}], [{"size": 0}]),
+            ("missing sizes", [{}], [{}]),
+        ]
+        for description, source_files, cross_seed_files in cases:
+            with self.subTest(description=description):
+                self.assertFalse(
+                    self.script.matches_source_files_with_small_extras(
+                        source_files, cross_seed_files
+                    )
+                )
+
+    def test_file_list_fallback_logs_when_no_size_candidates_exist(self):
+        source = {"hash": "sourcehash", "name": "Original.Release", "size": 2_000}
+        cross_seed = {"hash": "crosshash", "name": "Tracker.Release", "size": 1_000}
+
+        with (
+            patch.object(self.script, "get_torrent_files") as get_files,
+            self.assertLogs("autoratiorr", level="INFO") as logs,
+        ):
+            match = self.script.find_matching_original_torrent(
+                [source], cross_seed, "http://qbittorrent.local"
+            )
+
+        self.assertIsNone(match)
+        get_files.assert_not_called()
+        log_output = "\n".join(logs.output)
+        self.assertIn("reason=no_size_candidates", log_output)
+        self.assertIn("cross_seed_hash=crosshash", log_output)
+        self.assertIn("source_count=1", log_output)
+        self.assertIn("cross_seed_size=1000", log_output)
+        self.assertIn("max_extra_bytes=100", log_output)
+
+    def test_file_list_fallback_logs_when_file_lists_do_not_match(self):
+        source = {"hash": "sourcehash", "name": "Original.Release", "size": 1_000}
+        cross_seed = {"hash": "crosshash", "name": "Tracker.Release", "size": 1_000}
+        files = {
+            "crosshash": [{"name": "different.mkv", "size": 1_000}],
+            "sourcehash": [
+                {"name": "part1.mkv", "size": 600},
+                {"name": "part2.mkv", "size": 400},
+            ],
+        }
+
+        with (
+            patch.object(
+                self.script,
+                "get_torrent_files",
+                side_effect=lambda _url, torrent_hash: files[torrent_hash],
+            ),
+            self.assertLogs("autoratiorr", level="INFO") as logs,
+        ):
+            match = self.script.find_matching_original_torrent(
+                [source], cross_seed, "http://qbittorrent.local"
+            )
+
+        self.assertIsNone(match)
+        log_output = "\n".join(logs.output)
+        self.assertIn("reason=no_file_match", log_output)
+        self.assertIn("size_candidates=1", log_output)
+        self.assertIn("unavailable_file_lists=0", log_output)
+
+    def test_file_list_fallback_logs_unavailable_cross_seed_files(self):
+        source = {"hash": "sourcehash", "name": "Original.Release", "size": 1_000}
+        cross_seed = {"hash": "crosshash", "name": "Tracker.Release", "size": 1_000}
+
+        with (
+            patch.object(self.script, "get_torrent_files", return_value=None),
+            self.assertLogs("autoratiorr", level="INFO") as logs,
+        ):
+            match = self.script.find_matching_original_torrent(
+                [source], cross_seed, "http://qbittorrent.local"
+            )
+
+        self.assertIsNone(match)
+        self.assertIn("reason=cross_seed_files_unavailable", "\n".join(logs.output))
+
+    def test_file_list_fallback_logs_unavailable_source_files(self):
+        source = {"hash": "sourcehash", "name": "Original.Release", "size": 1_000}
+        cross_seed = {"hash": "crosshash", "name": "Tracker.Release", "size": 1_000}
+
+        with (
+            patch.object(
+                self.script,
+                "get_torrent_files",
+                side_effect=[[{"size": 1_000}], None],
+            ),
+            self.assertLogs("autoratiorr", level="INFO") as logs,
+        ):
+            match = self.script.find_matching_original_torrent(
+                [source], cross_seed, "http://qbittorrent.local"
+            )
+
+        self.assertIsNone(match)
+        log_output = "\n".join(logs.output)
+        self.assertIn("reason=no_file_match", log_output)
+        self.assertIn("unavailable_file_lists=1", log_output)
+
     def test_file_list_fallback_skips_ambiguous_matches(self):
         cross_seed = {
             "hash": "crosshash",
@@ -466,6 +654,67 @@ class MainLoopTests(unittest.TestCase):
             + "source_hash=sourcehash seed_limit_minutes=50",
             log_output,
         )
+
+    def test_main_aligns_linked_cross_seed_when_source_has_small_extra_files(self):
+        for state in ("stoppedUP", "stalledUP"):
+            with self.subTest(state=state):
+                cross_seed = {
+                    "hash": "crosshash",
+                    "name": "Tracker.Release",
+                    "state": state,
+                    "category": "cross-seed-link",
+                    "tags": "cross-seed",
+                    "size": 1_000,
+                    "seeding_time": 0,
+                }
+                source = {
+                    "hash": "sourcehash",
+                    "name": "Original.Release",
+                    "category": "movies",
+                    "tags": "",
+                    "size": 1_050,
+                    "seeding_time_limit": 60,
+                    "seeding_time": 600,
+                }
+
+                def fake_get(url, *, params, timeout):
+                    if url.endswith("/torrents/files"):
+                        payload = {
+                            "crosshash": [{"name": "renamed.mkv", "size": 1_000}],
+                            "sourcehash": [
+                                {"name": "feature.mkv", "size": 1_000},
+                                {"name": "release.nfo", "size": 50},
+                            ],
+                        }[params["hash"]]
+                    elif params.get("category") == "cross-seed-link":
+                        payload = [cross_seed]
+                    else:
+                        payload = [cross_seed, source]
+                    return Mock(ok=True, json=Mock(return_value=payload))
+
+                fake_session = Mock()
+                fake_session.get.side_effect = fake_get
+                fake_session.post.return_value = Mock(ok=True, status_code=204)
+                with (
+                    patch.object(self.script, "CAT_NAMES", ["cross-seed-link"]),
+                    patch.object(self.script, "DRY_RUN", False),
+                    patch.object(self.script, "session", fake_session),
+                    patch.object(self.script, "read_cache", return_value={}),
+                    patch.object(self.script, "cache_torrent") as cache_torrent,
+                    self.assertLogs("autoratiorr", level="INFO") as logs,
+                ):
+                    self.script.main()
+
+                self.assertEqual(fake_session.post.call_count, 2)
+                request = fake_session.post.call_args
+                self.assertTrue(request.args[0].endswith("/torrents/setShareLimits"))
+                self.assertEqual(request.kwargs["data"]["hashes"], "crosshash")
+                self.assertEqual(request.kwargs["data"]["seedingTimeLimit"], 50)
+                cache_torrent.assert_called_once_with("crosshash", {})
+                self.assertIn(
+                    "total_torrents=2 eligible_sources=1", "\n".join(logs.output)
+                )
+                self.assertNotIn("No matching source torrent", "\n".join(logs.output))
 
     def test_unhealthy_cross_seed_state_is_not_processed_or_cached(self):
         source = {
